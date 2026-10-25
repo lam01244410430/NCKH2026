@@ -1,0 +1,6 @@
+name: pc
+role: evaluation
+allowed_stages: [evaluate, prepare-ratings, analyze, plot, dry-run]
+device: cpu
+gpu_optional: true
+shard_namespace: pc

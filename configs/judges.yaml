@@ -1,0 +1,10 @@
+rubric_version: '1'
+dimensions: [naturalness, pedagogical_quality, cultural_appropriateness]
+score_range: [1, 5]
+human_fraction: 0.25
+rerate_fraction: 0.20
+rerate_after_days: 7
+seed: 20261025
+# Must be preregistered before treating judge scores as primary evidence.
+validation_threshold: null
+judge_model_family: null
