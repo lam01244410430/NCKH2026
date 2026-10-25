@@ -1,0 +1,1 @@
+{"id":"chatcmpl-qwen","object":"chat.completion","created":1700000000,"model":"qwen-snapshot-returned","choices":[{"index":0,"message":{"role":"assistant","content":"你好，世界。"},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}
