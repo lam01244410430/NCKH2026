@@ -1,6 +1,6 @@
 """Google Gen AI SDK adapter, separate from OpenAI-compatible providers.
 
-Live use requires `google-genai`. Imports and credentials are deferred until
+Live use requires `google-genai>=1.52.0,<2`. Imports and credentials are deferred until
 a real call; fixture tests never need either.
 """
 import os

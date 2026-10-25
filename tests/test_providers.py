@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import sys
 import types
+import tomllib
 from urllib.error import HTTPError
 
 import pytest
@@ -225,3 +226,72 @@ def test_nonobject_json_response_keeps_a_serializable_failure_payload(provider):
     with pytest.raises(ProviderError) as error:
         asyncio.run(make_generator(config, transport=transport).generate(request(config)))
     assert error.value.raw_response == {"response": ["invalid", "response"]}
+
+
+def test_gemini_dependency_range_excludes_sdk_without_required_async_features():
+    from packaging.requirements import Requirement
+    metadata = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8"))
+    requirement = next(Requirement(value) for value in metadata["project"]["optional-dependencies"]["providers"]
+                       if Requirement(value).name == "google-genai")
+    # 1.0.0 lacks the async context manager; 1.52.0 is verified below against
+    # real SDK classes, configuration validation, serializers, and HTTP routing.
+    assert "1.0.0" not in requirement.specifier
+    assert "1.51.0" not in requirement.specifier
+    assert "1.52.0" in requirement.specifier
+    assert "2.0.0" not in requirement.specifier
+
+
+@pytest.mark.parametrize("reject_seed", [False, True])
+def test_real_gemini_sdk_offline_http_serialization_and_seed_fallback(monkeypatch, reject_seed):
+    pytest.importorskip("google.genai", reason="install the providers extra for real-SDK compatibility checks")
+    import httpx
+    monkeypatch.setenv("GEMINI_API_KEY", "offline-test-key")
+    sent, clients = [], []
+    def handler(wire_request):
+        sent.append(json.loads(wire_request.content))
+        assert wire_request.url.host == "fixture.invalid"
+        assert wire_request.url.path.endswith("/models/gemini-frozen-id:generateContent")
+        if reject_seed and len(sent) == 1:
+            return httpx.Response(400, json={"error": {"code": 400, "status": "INVALID_ARGUMENT",
+                                                       "message": "seed is not supported"}})
+        return httpx.Response(200, json={
+            "responseId": "offline-gemini-response", "modelVersion": "gemini-returned-version",
+            "candidates": [{"index": 0, "content": {"role": "model", "parts": [
+                {"text": "hidden thought", "thought": True}, {"text": "你好，世界。"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 12, "candidatesTokenCount": 8, "totalTokenCount": 20},
+        })
+    real_async_client = httpx.AsyncClient
+    def offline_async_client(**options):
+        client = real_async_client(**options, transport=httpx.MockTransport(handler))
+        clients.append(client)
+        return client
+    # Keep the real SDK and HTTP client; replace only the network transport.
+    monkeypatch.setattr(httpx, "AsyncClient", offline_async_client)
+    config = model("gemini", base_url="https://fixture.invalid", capabilities={"seed": True, "json_output": True})
+    record = asyncio.run(make_generator(config).generate(request(config)))
+    assert record.text == "你好，世界。" and record.request_id == "offline-gemini-response"
+    assert record.finish_reason == "STOP" and record.seed_applied is not reject_seed
+    assert record.usage.model_dump() == {"input_tokens": 12, "output_tokens": 8, "total_tokens": 20}
+    assert sent[-1]["generationConfig"] == {"temperature": .4, "topP": .9, "maxOutputTokens": 100,
+                                           "responseMimeType": "application/json", **({} if reject_seed else {"seed": 7})}
+    assert sent[-1]["contents"] == [{"parts": [{"text": "你好"}], "role": "user"}]
+    assert sent[-1]["systemInstruction"]["parts"] == [{"text": "Return JSON."}]
+    assert len(sent) == (2 if reject_seed else 1)
+    assert all(client.is_closed for client in clients)
+
+
+def test_real_gemini_sdk_offline_rate_limit_has_no_implicit_retries(monkeypatch):
+    pytest.importorskip("google.genai", reason="install the providers extra for real-SDK compatibility checks")
+    import httpx
+    monkeypatch.setenv("GEMINI_API_KEY", "offline-test-key")
+    sent = []
+    def handler(wire_request):
+        sent.append(wire_request)
+        return httpx.Response(429, json={"error": {"code": 429, "status": "RESOURCE_EXHAUSTED", "message": "rate limited"}})
+    real_async_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **options: real_async_client(**options, transport=httpx.MockTransport(handler)))
+    config = model("gemini", base_url="https://fixture.invalid")
+    with pytest.raises(ProviderError) as error:
+        asyncio.run(make_generator(config).generate(request(config)))
+    assert error.value.status_code == 429
+    assert len(sent) == 1
