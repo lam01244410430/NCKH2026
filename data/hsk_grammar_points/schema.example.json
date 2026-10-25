@@ -1,0 +1,13 @@
+[
+  {
+    "grammar_id": "example-only",
+    "pattern": "待替换的语法点",
+    "min_hsk_level": 3,
+    "description": "Illustrative record only; replace with verified source content.",
+    "examples": ["此处填写经过验证的例句。"],
+    "standard": "illustrative-only-not-an-official-mapping",
+    "source": "Replace with a verified licensed source citation",
+    "license": "Replace with redistribution terms",
+    "notes": "Development example; level is illustrative only."
+  }
+]
