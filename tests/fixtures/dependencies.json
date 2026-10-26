@@ -1,0 +1,1 @@
+{"sentences":[{"tokens":[{"index":1,"text":"我","head":2,"relation":"nsubj"},{"index":2,"text":"学习","head":0,"relation":"root"},{"index":3,"text":"中文","head":2,"relation":"obj"}]},{"tokens":[{"index":1,"text":"今天","head":3,"relation":"advmod"},{"index":2,"text":"我","head":3,"relation":"nsubj"},{"index":3,"text":"阅读","head":0,"relation":"root"}]}]}
