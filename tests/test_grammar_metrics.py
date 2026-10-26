@@ -1,9 +1,46 @@
+import json
+from pathlib import Path
+
 import pytest
 
 from hsk_agent_bench.evaluators.grammar import (
-    GrammarCatalog, GrammarFlag, candidate_grammar_flags,
+    GrammarCatalog, GrammarFlag, GrammarRule, candidate_grammar_flags,
     confirmed_violation_rate, score_grammar_alignment,
 )
+
+
+def test_catalog_snapshots_rules_and_rejects_mutation():
+    rule = GrammarRule(grammar_id="because", level=3, pattern="因为")
+    catalog = GrammarCatalog([rule])
+    digest = catalog.sha256
+    assert catalog.rules[0] is not rule
+    with pytest.raises(ValueError):
+        catalog.rules[0].level = 5
+    with pytest.raises(ValueError):
+        rule.pattern = "虽然"
+    with pytest.raises(AttributeError):
+        catalog.rules = ()
+    result = score_grammar_alignment("因为", 3, catalog)
+    assert result.target_level_matches == 1
+    assert result.metadata["catalog_sha256"] == digest
+
+
+def test_canonical_resource_projection_preserves_provenance_and_snapshot():
+    entries = json.loads((Path(__file__).parents[1] /
+                         "data/hsk_grammar_points/schema.example.json").read_text(encoding="utf-8"))
+    catalog = GrammarCatalog.from_canonical(entries)
+    rule = catalog.rules[0]
+    assert rule.level == 3
+    assert rule.provenance.source == "Replace with a verified licensed source citation"
+    assert rule.provenance.standard == "illustrative-only-not-an-official-mapping"
+    assert rule.provenance.license == "Replace with redistribution terms"
+    assert rule.provenance.examples == ("此处填写经过验证的例句。",)
+    digest = catalog.sha256
+    entries[0]["examples"].append("changed")
+    entries[0]["min_hsk_level"] = 6
+    assert score_grammar_alignment("待替换的语法点", 3, catalog).target_level_matches == 1
+    assert catalog.sha256 == digest
+    assert GrammarCatalog.from_canonical(entries).sha256 != digest
 
 
 def test_catalog_counts_occurrences_and_levels_separately():

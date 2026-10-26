@@ -21,6 +21,13 @@ def test_sentence_length_splits_terminal_punctuation_and_ignores_empty_sentences
     assert mean_sentence_length("。！？", tokenize_chinese) == 0
 
 
+def test_sentence_length_counts_only_chinese_lexical_tokens():
+    assert mean_sentence_length("我 学习 HSK 3。", str.split) == 2
+    assert mean_sentence_length("我 学习 HSK 3。HSK ３。", str.split) == 2
+    assert mean_sentence_length("我 中文ABC 学习 ３ + 😀。", str.split) == 2
+    assert mean_sentence_length("HSK 3 +。", str.split) == 0
+
+
 def test_dependency_distance_uses_all_nonroot_arcs():
     assert mean_dependency_distance(document()) == 1.25
     assert mean_dependency_distance(ParsedDocument(sentences=[])) == 0

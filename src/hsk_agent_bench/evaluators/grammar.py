@@ -6,38 +6,82 @@ never error labels. Human decisions are supplied separately, keyed by flag_id.
 """
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 import hashlib
 import json
 import re
 from typing import Literal, Protocol
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, model_validator
 
 from ..schemas import Record
 
 
+class CanonicalGrammarResource(Record):
+    """Typed snapshot of data/hsk_grammar_points/schema.example.json entries."""
+
+    model_config = ConfigDict(frozen=True)
+    grammar_id: str = Field(min_length=1)
+    pattern: str = Field(min_length=1)
+    min_hsk_level: int = Field(strict=True, ge=1, le=9)
+    description: str
+    examples: tuple[str, ...]
+    standard: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    license: str = Field(min_length=1)
+    notes: str | None = None
+
+
 class GrammarRule(Record):
+    model_config = ConfigDict(frozen=True)
     grammar_id: str = Field(min_length=1)
     level: int = Field(strict=True, ge=1, le=9)
     pattern: str = Field(min_length=1)
+    provenance: CanonicalGrammarResource | None = None
 
 
+@dataclass(frozen=True, init=False)
 class GrammarCatalog:
     """Versionable regex catalog; matches indicate presence, not grammaticality."""
 
+    rules: tuple[GrammarRule, ...]
+    patterns: tuple[re.Pattern[str], ...]
+    sha256: str
+
     def __init__(self, entries: Sequence[GrammarRule | Mapping]):
-        self.rules = tuple(GrammarRule.model_validate(entry) for entry in entries)
+        # Revalidation snapshots even existing model instances and nested provenance.
+        rules = tuple(GrammarRule.model_validate(
+            entry.model_dump() if isinstance(entry, GrammarRule) else entry
+        ) for entry in entries)
+        object.__setattr__(self, "rules", rules)
         if len({rule.grammar_id for rule in self.rules}) != len(self.rules):
             raise ValueError("grammar IDs must be unique")
         try:
-            self.patterns = tuple(re.compile(rule.pattern) for rule in self.rules)
+            patterns = tuple(re.compile(rule.pattern) for rule in self.rules)
         except re.error as exc:
             raise ValueError("invalid grammar regex") from exc
+        object.__setattr__(self, "patterns", patterns)
         if any(pattern.search("") is not None for pattern in self.patterns):
             raise ValueError("grammar patterns must not match empty strings")
-        self.sha256 = hashlib.sha256(json.dumps(
+        digest = hashlib.sha256(json.dumps(
             [rule.model_dump() for rule in self.rules], ensure_ascii=False,
             sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        object.__setattr__(self, "sha256", digest)
+
+    @classmethod
+    def from_canonical(cls, entries: Sequence[CanonicalGrammarResource | Mapping]) -> "GrammarCatalog":
+        """Project canonical min_hsk_level to level; retain all source fields.
+
+        Canonical pattern strings are interpreted as evaluator regexes. Resources
+        must therefore be curated for regex matching before study use; this loader
+        does not infer correctness or official HSK status from source metadata.
+        """
+        resources = (CanonicalGrammarResource.model_validate(
+            entry.model_dump() if isinstance(entry, CanonicalGrammarResource) else entry
+        ) for entry in entries)
+        return cls([GrammarRule(grammar_id=resource.grammar_id,
+                                level=resource.min_hsk_level, pattern=resource.pattern,
+                                provenance=resource) for resource in resources])
 
 
 class GrammarMatch(Record):

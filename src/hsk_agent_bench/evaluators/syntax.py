@@ -91,15 +91,21 @@ class LazyParser:
 
 
 def mean_sentence_length(text: str, tokenizer: Tokenizer) -> float:
-    """Mean non-punctuation token count over nonempty terminal-delimited sentences.
+    """Mean Chinese lexical tokens over sentences containing Chinese tokens.
 
     Chinese/ASCII full stops, questions, exclamations and newlines terminate a
-    sentence. Commas and semicolons do not. Empty/punctuation-only input is zero.
+    sentence. Commas and semicolons do not. A token counts only when every
+    character is a Unicode-named CJK unified/compatibility ideograph or 〇.
+    This includes Han numerals (一), excludes Latin, Arabic/fullwidth digits,
+    symbols and mixed-script tokens, and preserves the supplied token boundaries.
+    Sentences with no Chinese tokens are omitted; empty input returns zero.
     """
     lengths = []
     for sentence in re.split(r"[。！？.!?\r\n]+", text):
-        count = sum(not all(char.isspace() or unicodedata.category(char).startswith("P")
-                            for char in token) for token in tokenizer(sentence))
+        count = sum(bool(token) and all(
+            char == "〇" or unicodedata.name(char, "").startswith(
+                ("CJK UNIFIED IDEOGRAPH-", "CJK COMPATIBILITY IDEOGRAPH-"))
+            for char in token) for token in tokenizer(sentence))
         if count:
             lengths.append(count)
     return sum(lengths) / len(lengths) if lengths else 0.0
@@ -123,9 +129,11 @@ def score_syntax(text: str, tokenizer: Tokenizer, parser: Parser, *,
     except Exception as exc:
         error = f"{type(exc).__name__}: {exc}"
     metadata = {"parser_name": parser.name, "parser_version": parser.version,
-                "parser_device": parser.device, "root_arc_policy": "exclude head=0"}
+                "parser_device": parser.device, "root_arc_policy": "exclude head=0",
+                "sentence_token_policy": "all characters Han ideographs or 〇; omit zero-Chinese sentences",
+                "unicode_version": unicodedata.unidata_version}
     if error is not None:
         metadata["parser_error"] = error
     return MetricRecord(generation_id=generation_id, prompt_id=prompt_id,
-                        evaluator="syntax", evaluator_version="1", device=parser.device,
+                        evaluator="syntax", evaluator_version="2", device=parser.device,
                         metrics=metrics, metadata=metadata)
