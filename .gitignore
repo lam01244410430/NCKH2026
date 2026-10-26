@@ -7,3 +7,7 @@ build/
 dist/
 .env
 configs/models.yaml
+outputs/*
+!outputs/*/
+outputs/*/*
+!outputs/*/.gitkeep
