@@ -82,9 +82,14 @@ Provider `text` must be one strict JSON object matching the requested task
 schema. Evaluation and rating preparation validate that object (including HSK
 level and exam-option uniqueness), then score/show a deterministic learner-facing
 projection. The original `text` and raw provider response remain unchanged in
-the immutable generation shard. A shard is complete only when its sibling `.sha256` file is
-present and verifies. Transfer both files to the PC and verify checksums before
-evaluation; never let the laptop and PC write the same shard namespace.
+the immutable generation shard. Analysis CSVs preserve that raw JSON in `text`
+and store the validated projection separately as `material_text`.
+`prepare-ratings` validates the raw JSON again, verifies any existing
+`material_text`, and exposes only the projection to raters; it never treats
+arbitrary plain text as valid provider output. A shard is complete only when
+its sibling `.sha256` file is present and verifies. Transfer both files to the
+PC and verify checksums before evaluation; never let the laptop and PC write
+the same shard namespace.
 
 ```powershell
 Get-FileHash outputs/raw/<run>/<shard>.jsonl -Algorithm SHA256

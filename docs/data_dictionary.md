@@ -97,7 +97,8 @@ dropping rows.
 The evaluator-facing CSV contains only `rating_id`, `task`, `hsk_level`, and
 `text`; it never contains provider, model, origin, generation ID, or prompt ID.
 The separately protected coordinator key maps random `rating_id` values back to
-the complete generation metadata. Rating records contain rater ID/type, 1–5
+the complete generation metadata, retaining raw JSON in `text` and the displayed
+projection in `material_text`. Rating records contain rater ID/type, 1–5
 dimension scores, rubric version, evidence spans, and optional rating time.
 For an empty or whitespace-only projected output, judge evidence uses the
 literal marker `[blank output]`; raw output remains preserved.
@@ -106,6 +107,11 @@ literal marker `[blank output]`; raw output remains preserved.
 
 The joined table has one row per `generation_id`/`prompt_id`, generation
 metadata, evaluator keys unchanged, and ratings prefixed `human_` or `llm_`.
+Its `text` column remains the unmodified task JSON from `GenerationRecord`; the
+separate `material_text` column contains the validated learner-facing
+projection. Rating preparation reparses `text`, rejects malformed JSON, and
+requires a supplied `material_text` value to match the deterministic projection
+before copying that projection into the blinded sheet's `text` column.
 Callers select one run/replicate and provide enabled frozen model IDs in config
 order before aggregation. Statistical CSVs include `pvalue`, Holm-adjusted
 `p_adjusted`, `rank_biserial`, `median_difference`, `ci_low`, `ci_high`, paired

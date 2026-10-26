@@ -109,3 +109,16 @@ def test_rating_preparation_projects_all_tasks_and_rejects_malformed_outputs(tmp
     ])
     assert failed.exit_code != 0
     assert not (tmp_path / "bad-rating.csv").exists()
+
+    mismatched = pd.DataFrame([record.model_dump(mode="json") for record in records])
+    mismatched["material_text"] = "unvalidated replacement"
+    mismatched.to_csv(tmp_path / "mismatched.csv", index=False)
+    mismatch = CliRunner().invoke(app, [
+        "prepare-ratings", "--input", str(tmp_path / "mismatched.csv"),
+        "--output", str(tmp_path / "mismatch-rating.csv"),
+        "--key-output", str(tmp_path / "mismatch-key.csv"),
+        "--device", "configs/devices/pc.yaml", "--fraction", "1",
+    ])
+    assert mismatch.exit_code != 0
+    assert "material_text does not match" in str(mismatch.exception)
+    assert not (tmp_path / "mismatch-rating.csv").exists()

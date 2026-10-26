@@ -109,6 +109,21 @@ def _load_frame(path: Path) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
+def _validated_material_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """Preserve raw task JSON and attach its validated learner-facing projection."""
+    required = {"task", "hsk_level", "text"}
+    missing = required - set(frame)
+    if missing:
+        raise ValueError(f"material table missing columns: {sorted(missing)}")
+    result = frame.copy()
+    projected = [project_material_text(task, text, hsk_level=int(level))
+                 for task, text, level in zip(result.task, result.text, result.hsk_level)]
+    if "material_text" in result and result.material_text.tolist() != projected:
+        raise ValueError("material_text does not match the validated projection of raw text")
+    result["material_text"] = projected
+    return result
+
+
 def _condition(frame: pd.DataFrame, run_id: str | None, replicate: int | None) -> pd.DataFrame:
     selected = frame
     for column, value in (("run_id", run_id), ("replicate", replicate)):
@@ -239,11 +254,9 @@ def prepare_ratings(input_path: Annotated[Path, typer.Option("--input")], output
                     fraction: Annotated[float, typer.Option()] = .25) -> None:
     """Create a blinded rating sheet and a separately stored coordinator key."""
     _profile(device, "prepare-ratings")
-    frame = _load_frame(input_path)
-    frame = frame.copy()
-    frame["text"] = [project_material_text(task, text, hsk_level=int(level))
-                     for task, text, level in zip(frame.task, frame.text, frame.hsk_level)]
-    sheet, key = blind_rating_sheet(sample_for_human_rating(frame, fraction=fraction))
+    frame = _validated_material_frame(_load_frame(input_path))
+    sample = sample_for_human_rating(frame, fraction=fraction)
+    sheet, key = blind_rating_sheet(sample, display_text_column="material_text")
     for path in (output, key_output):
         if path.exists():
             raise FileExistsError(f"output already exists: {path}")
@@ -385,9 +398,9 @@ def dry_run(config: PathOption, device: PathOption,
     metric_shard = output_dir / "metrics" / "metrics.jsonl"
     evaluate_shard(raw, metric_shard, EvaluationConfig(lexicon=lexicon, parser=_DryParser()))
     metric_records = _read_records(metric_shard, MetricRecord)
-    generations = pd.DataFrame([record.model_dump(mode="json") for record in records])
-    generations["text"] = [project_material_text(record.task, record.text, hsk_level=record.hsk_level)
-                           for record in records]
+    generations = _validated_material_frame(pd.DataFrame([
+        record.model_dump(mode="json") for record in records
+    ]))
     metrics = pd.DataFrame([record.model_dump(mode="json") for record in metric_records])
     table = join_analysis_tables(generations, metrics)
     # This fixture is exactly one run/replicate condition. Preserve frozen config order.
@@ -397,7 +410,7 @@ def dry_run(config: PathOption, device: PathOption,
     metric_table = output_dir / "metrics" / "metrics.csv"
     table.to_csv(metric_table, index=False)
     sample = sample_for_human_rating(generations, fraction=1)
-    sheet, key = blind_rating_sheet(sample)
+    sheet, key = blind_rating_sheet(sample, display_text_column="material_text")
     rating_sheet = output_dir / "ratings" / "rating_sheet.csv"
     rating_sheet.parent.mkdir(parents=True)
     sheet.to_csv(rating_sheet, index=False)

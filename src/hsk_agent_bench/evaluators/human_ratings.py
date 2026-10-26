@@ -71,7 +71,8 @@ no effect; different-size strata retain their original proportions.
     return source.loc[selected].sort_values("generation_id").reset_index(drop=True)
 
 
-def blind_rating_sheet(records: pd.DataFrame, seed: int = 20261025
+def blind_rating_sheet(records: pd.DataFrame, seed: int = 20261025, *,
+                       display_text_column: str = "text"
                        ) -> tuple[pd.DataFrame, BlindingKey]:
     """Whitelist rating content and schedule without adjacent prompt siblings.
 
@@ -81,7 +82,10 @@ The key retains original record metadata and must be stored separately.
 Output text is preserved verbatim; self-identification inside generated
 content requires coordinator review before release to raters.
 """
-    source = _require_records(records, ["generation_id", "prompt_id", "task", "hsk_level", "text"])
+    required = ["generation_id", "prompt_id", "task", "hsk_level", "text"]
+    if display_text_column != "text":
+        required.append(display_text_column)
+    source = _require_records(records, required)
     rng = random.Random(seed)
     groups = []
     for _, cell in source.groupby("prompt_id", sort=True):
@@ -102,7 +106,8 @@ content requires coordinator review before release to raters.
     rating_ids = [f"r-{rng.getrandbits(128):032x}" for _ in order]
     ordered = source.loc[order].reset_index(drop=True)
     sheet = pd.DataFrame({"rating_id": rating_ids, "task": ordered.task.tolist(),
-                          "hsk_level": ordered.hsk_level.tolist(), "text": ordered.text.tolist()})
+                          "hsk_level": ordered.hsk_level.tolist(),
+                          "text": ordered[display_text_column].tolist()})
     mapping = ordered.copy(deep=True)
     mapping.insert(0, "rating_id", rating_ids)
     return sheet, BlindingKey(mapping=mapping)
