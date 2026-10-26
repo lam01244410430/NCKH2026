@@ -18,11 +18,13 @@ from ..schemas import (ChatMessage, GenerationParameters, GenerationRecord,
                        GenerationRequest, HSKLevel, NonEmpty, OrdinalScore,
                        PromptRecord, RatingRecord, Record, TaskType)
 from .human_ratings import ReliabilityReport, score_intrarater
+from .materials import project_material_text
 
 
 CORE_DIMENSIONS = ("naturalness", "pedagogical_quality", "cultural_appropriateness")
 TASK_DIMENSIONS = {"reading": "reading_coherence", "grammar_explanation": "explanation_accuracy",
                    "exam_generation": "item_validity"}
+BLANK_OUTPUT_EVIDENCE = "[blank output]"
 
 
 def _anchors() -> dict[str, dict[str, str]]:
@@ -81,7 +83,9 @@ class NormalizedOutput(Record):
         if prompt is not None and any(getattr(record, key) != getattr(prompt, key)
                                       for key in ("prompt_id", "task", "hsk_level")):
             raise ValueError("generation and prompt do not match")
-        return cls(**{key: getattr(record, key) for key in cls.model_fields})
+        values = {key: getattr(record, key) for key in cls.model_fields}
+        values["text"] = project_material_text(record.task, record.text, hsk_level=record.hsk_level)
+        return cls(**values)
 
 
 class JudgeRubric(Record):
@@ -114,7 +118,8 @@ def render_judge_request(output: NormalizedOutput, rubric: JudgeRubric) -> Gener
         "scores and evidence. Both must contain exactly the rubric dimension names. Scores must "
         "be integers 1 through 5. Evidence must be a nonempty verbatim span of at most 240 characters "
         "from the output for each dimension. Do not identify or guess the generating model. "
-        "For empty output only, use the evidence string [empty output].")),
+        f"For blank output (empty or whitespace-only) only, use the evidence string "
+        f"{BLANK_OUTPUT_EVIDENCE}.")),
         ChatMessage(role="user", content=canonical_json({
             "task": output.task, "hsk_level": output.hsk_level, "output": output.text,
             "rubric_version": rubric.rubric_version, "rubric": rubric.for_task(output.task)}))]
@@ -180,7 +185,7 @@ def parse_judge_response(response: GenerationRecord, output: NormalizedOutput,
         for span in payload.evidence.values():
             if not span.strip() or len(span) > 240:
                 raise ValueError("evidence must be a nonempty short span")
-            if (span not in output.text if output.text else span != "[empty output]"):
+            if (span != BLANK_OUTPUT_EVIDENCE if not output.text.strip() else span not in output.text):
                 raise ValueError("evidence must be a verbatim output span")
         rating = RatingRecord(generation_id=output.generation_id, prompt_id=output.prompt_id,
                               rater_id=rubric.judge_model.model_id, rater_type="llm",

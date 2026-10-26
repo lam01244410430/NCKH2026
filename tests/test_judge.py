@@ -13,12 +13,14 @@ from hsk_agent_bench.schemas import GenerationRecord, RatingRecord
 
 
 def source_record():
+    material = {"title": "学习中文", "passage": "小明今天去学校学习中文。", "declared_hsk_level": 4,
+                "used_required_vocabulary": [], "used_required_grammar": []}
     return GenerationRecord(
         generation_id="source-g", prompt_id="source-p", task="reading", hsk_level=4,
         family="SECRET-SOURCE", provider="qwen", origin="china", model_id="secret-source-model",
         prompt_hash="a" * 64, messages=[dict(role="user", content="secret source config")],
         parameters=dict(temperature=0, top_p=1, max_output_tokens=500),
-        text="小明今天去学校学习中文。", raw_response={"private": "secret"},
+        text=json.dumps(material, ensure_ascii=False), raw_response={"private": "secret"},
         requested_at="2026-10-26T00:00:00Z", latency_ms=1, seed_applied=False,
     )
 
@@ -55,7 +57,7 @@ def test_request_uses_generation_contract_but_source_identity_is_not_in_messages
     payload = json.loads(request.messages[1].content)
     assert payload["task"] == "reading"
     assert payload["hsk_level"] == 4
-    assert payload["output"] == "小明今天去学校学习中文。"
+    assert payload["output"] == "学习中文\n小明今天去学校学习中文。"
     assert set(payload["rubric"]["naturalness"]) == {"1", "2", "3", "4", "5"}
     assert "reading_coherence" in payload["rubric"]
     assert "explanation_accuracy" not in payload["rubric"]
@@ -84,15 +86,17 @@ def test_response_for_another_item_is_rejected_with_raw_record():
         parse_judge_response(raw, output, rubric())
 
 
-def test_empty_output_can_be_scored_without_fabricated_evidence():
+@pytest.mark.parametrize("blank", ["", "   \n\t"])
+def test_blank_output_can_be_scored_with_one_consistent_marker(blank):
     output = NormalizedOutput.from_generation(source_record())
-    output.text = ""
+    output.text = blank
     request = render_judge_request(output, rubric())
     payload = valid_payload()
-    payload["evidence"] = dict.fromkeys(payload["scores"], "[empty output]")
+    payload["evidence"] = dict.fromkeys(payload["scores"], "[blank output]")
     raw = GenerationRecord(**request.model_dump(), text=json.dumps(payload), raw_response={"answer": payload},
                            requested_at="2026-10-26T00:00:00Z", latency_ms=2, seed_applied=False)
-    assert parse_judge_response(raw, output, rubric()).rating.evidence["naturalness"] == "[empty output]"
+    assert parse_judge_response(raw, output, rubric()).rating.evidence["naturalness"] == "[blank output]"
+    assert json.loads(request.messages[1].content)["output"] == blank
 
 
 @pytest.mark.parametrize("task,dimension", [("grammar_explanation", "explanation_accuracy"),

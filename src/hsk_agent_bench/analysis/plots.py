@@ -61,7 +61,17 @@ def build_all_figures(frame: pd.DataFrame, output_dir: Path, *,
     if ("model_id" not in frame or not order or len(order) != len(set(order))
             or set(order) != set(frame.model_id)):
         raise ValueError("model_order must explicitly list each observed model exactly once")
-    available = [name for name in METRICS if name in frame]
+    available = []
+    unavailable = []
+    for name in METRICS:
+        if name not in frame:
+            continue
+        numeric = pd.to_numeric(frame[name], errors="coerce")
+        missing = int((numeric.isna() | ~np.isfinite(numeric.fillna(0))).sum())
+        if missing:
+            unavailable.append(f"{name} unavailable ({missing}/{len(frame)} missing or nonfinite; no rows dropped)")
+        else:
+            available.append(name)
     if not available:
         raise ValueError("no supported evaluator metrics available")
     metric = "v_in_token" if "v_in_token" in available else available[0]
@@ -98,6 +108,8 @@ def build_all_figures(frame: pd.DataFrame, output_dir: Path, *,
         sns.heatmap(scaled, annot=table, fmt=".3g", cmap="vlag", center=0, ax=ax,
                     cbar_kws={"label": "Within-metric standardized mean"})
         ax.set_title("Overall model and origin means (annotations: raw units)")
+        if unavailable:
+            fig.text(.5, .01, "; ".join(unavailable), ha="center", va="bottom", fontsize=8, wrap=True)
         ax.tick_params(axis="x", rotation=40)
         plt.setp(ax.get_xticklabels(), ha="right")
         fig.tight_layout()

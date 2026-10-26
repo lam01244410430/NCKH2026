@@ -3,16 +3,18 @@ import asyncio
 import copy
 import json
 from collections import Counter
+from pathlib import Path
 
 import pytest
 
 import hsk_agent_bench.runner as runner
-from hsk_agent_bench.config import RunConfig
+from hsk_agent_bench.config import RunConfig, load_experiment_config
 from hsk_agent_bench.generators import make_generator
 from hsk_agent_bench.generators.base import ProviderError
 from hsk_agent_bench.io import verify_shard
 from hsk_agent_bench.prompts.common import hash_messages
 from hsk_agent_bench.prompts.reading import render_reading_prompt
+from hsk_agent_bench.prompts.manifest import build_manifest
 from hsk_agent_bench.schemas import PromptRecord, ReadingPayload
 from test_providers import fixture, model
 
@@ -214,6 +216,25 @@ def test_fraction_is_same_across_models_and_disabled_models_make_no_calls(tmp_pa
                                              settings(fraction=.25), tmp_path))
     assert result.succeeded == 4 and len(result.shards) == 2
     assert {row["prompt_id"] for row in lines(result.shards[0])} == {row["prompt_id"] for row in lines(result.shards[1])}
+
+
+def test_fraction_is_allocated_within_each_task_level_stratum_and_order_independent(tmp_path, monkeypatch):
+    async def transport(payload):
+        return fixture("openai")
+    install_transport(monkeypatch, transport)
+    root = Path(__file__).resolve().parents[1]
+    prompts = build_manifest(load_experiment_config(root / "configs/experiment.yaml"))
+    run = settings(fraction=.25, max_output_tokens={
+        "reading": 100, "grammar_explanation": 100, "exam_generation": 100,
+    })
+    first = asyncio.run(runner.run_manifest(prompts, [model("openai")], run, tmp_path / "first"))
+    second = asyncio.run(runner.run_manifest(list(reversed(prompts)), [model("openai")], run,
+                                             tmp_path / "second"))
+    first_rows, second_rows = lines(first.shards[0]), lines(second.shards[0])
+    counts = Counter((row["task"], row["hsk_level"]) for row in first_rows)
+    assert len(counts) == 12
+    assert set(counts.values()) == {3}
+    assert {row["prompt_id"] for row in first_rows} == {row["prompt_id"] for row in second_rows}
 
 
 def test_resume_preserves_retry_budget_and_backoff_after_cancelled_wait(tmp_path, monkeypatch):

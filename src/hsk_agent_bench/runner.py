@@ -102,6 +102,19 @@ def _validate_record(record: GenerationRecord, request: GenerationRequest) -> No
         raise ValueError("generation checkpoint request identity mismatch")
 
 
+def select_prompts(manifest: Sequence[PromptRecord], run: RunConfig) -> list[PromptRecord]:
+    """Select a deterministic fraction independently inside each task/level stratum."""
+    groups: dict[tuple[TaskType, int], list[PromptRecord]] = {}
+    for prompt in manifest:
+        groups.setdefault((prompt.task, prompt.hsk_level), []).append(prompt)
+    selected_ids = set()
+    for prompts in groups.values():
+        ranked = sorted(prompts, key=lambda prompt: _digest(
+            [run.seeds[0], prompt.prompt_id, prompt.prompt_hash]))
+        selected_ids.update(prompt.prompt_id for prompt in ranked[:math.ceil(len(ranked) * run.fraction)])
+    return [prompt for prompt in manifest if prompt.prompt_id in selected_ids]
+
+
 async def run_manifest(
     manifest: Sequence[PromptRecord], models: Sequence[ModelConfig], run: RunConfig, output_dir: Path, *,
     run_id: str | None = None, shard_namespace: str = "laptop",
@@ -161,11 +174,9 @@ async def run_manifest(
     summary = RunSummary(run_id=run_id, output_dir=root)
     if not prompts or not enabled:
         return summary
-    # Rank without process-dependent random state; preserve original prompt order
-    # inside final shards, and use the identical subset for every model/repeat.
-    selected_ids = {prompt.prompt_id for prompt in sorted(prompts, key=lambda prompt: _digest(
-        [run.seeds[0], prompt.prompt_id, prompt.prompt_hash]))[:math.ceil(len(prompts) * run.fraction)]}
-    selected = [prompt for prompt in prompts if prompt.prompt_id in selected_ids]
+    # Preserve input order inside shards; membership is order-independent and the
+    # same task/level-balanced subset is reused across every model/seed/repeat.
+    selected = select_prompts(prompts, run)
     for directory in (root, root / ".state", root / ".checkpoints", root / ".failures"):
         directory.mkdir(parents=True, exist_ok=True)
     _ensure_metadata(root / ".state" / "identity.jsonl", _Identity(digest=identity))

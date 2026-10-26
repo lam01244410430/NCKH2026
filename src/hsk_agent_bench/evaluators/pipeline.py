@@ -14,6 +14,7 @@ from ..io import verify_shard, write_jsonl_shard_atomic
 from ..schemas import GenerationRecord, MetricRecord, Record
 from .grammar import GrammarCatalog, score_grammar_alignment
 from .lexical import HSKLexicon, score_lexical_alignment
+from .materials import material_metadata, project_material_text
 from .syntax import LazyParser, ParsedDocument, Parser, score_syntax
 from .tokenization import tokenize_chinese
 
@@ -117,9 +118,10 @@ def evaluate_shard(input_path: Path, output_path: Path,
     parser = config.parser or _UnavailableParser()
     metrics = []
     for record in records:
-        lexical = score_lexical_alignment(record.text, record.hsk_level, config.lexicon)
+        text = project_material_text(record.task, record.text, hsk_level=record.hsk_level)
+        lexical = score_lexical_alignment(text, record.hsk_level, config.lexicon)
         syntax = score_syntax(
-            record.text, lambda text: tokenize_chinese(text, config.lexicon), parser,
+            text, lambda value: tokenize_chinese(value, config.lexicon), parser,
             generation_id=record.generation_id, prompt_id=record.prompt_id,
         )
         values = {
@@ -127,9 +129,10 @@ def evaluate_shard(input_path: Path, output_path: Path,
             if key not in {"tokens", "scorable_tokens", "metadata"}
         }
         values.update(syntax.metrics)
-        metadata = {"lexical": lexical.metadata, "syntax": syntax.metadata}
+        metadata = {"material": material_metadata(record.task, record.text, text),
+                    "lexical": lexical.metadata, "syntax": syntax.metadata}
         if config.grammar_catalog is not None:
-            grammar = score_grammar_alignment(record.text, record.hsk_level, config.grammar_catalog)
+            grammar = score_grammar_alignment(text, record.hsk_level, config.grammar_catalog)
             values.update({
                 "in_level_matches": float(grammar.in_level_matches),
                 "target_level_matches": float(grammar.target_level_matches),

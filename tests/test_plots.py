@@ -68,6 +68,16 @@ def test_missing_repeats_or_ratings_are_labelled_unavailable(plot_frame, tmp_pat
     assert "unavailable" in svg_text(tmp_path / "judge_human_agreement.svg").lower()
 
 
+def test_parser_missing_metric_is_reported_without_dropping_rows(plot_frame, tmp_path):
+    frame = plot_frame.copy()
+    frame["mean_dependency_distance"] = None
+    paths = build_all_figures(frame, tmp_path)
+    assert len(paths) == 12
+    heatmap = svg_text(tmp_path / "overall_heatmap.svg").lower()
+    assert "mean_dependency_distance unavailable" in heatmap
+    assert "64/64 missing" in heatmap
+
+
 @pytest.mark.parametrize("order", [None, ["GPT"], ["GPT", "GPT", "Qwen", "DeepSeek", "Gemini"]])
 def test_configuration_must_explicitly_order_all_models(plot_frame, tmp_path, order):
     plot_frame.attrs.clear()

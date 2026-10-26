@@ -51,8 +51,20 @@ replicate, generated `text`, raw provider response, request timestamp/ID,
 reported model version, latency, token usage, finish reason, retry count, and
 whether the provider applied the seed. Secrets are never stored.
 
+`text` is the provider's unmodified strict JSON object for the task-specific
+`ReadingOutput`, `GrammarOutput`, or `ExamOutput` schema. Before automatic
+evaluation or blinded rating preparation, it is validated and converted to a
+deterministic learner-facing projection. Malformed JSON, a mismatched declared
+HSK level, and invalid exam items such as duplicated options are rejected; the
+generation shard and `raw_response` are never rewritten. Projection metadata
+records the schema, projection version, and SHA-256 hashes of raw and projected
+text.
+
 `generation_id` is unique. `run_id` plus `replicate` identifies the analysis
 condition; repeated conditions must be selected explicitly before inference.
+When `fraction < 1`, selection uses a deterministic ceiling allocation within
+each task/HSK-level stratum. The selected prompt IDs are reused for all models,
+seeds, and replicates and do not depend on manifest row order.
 
 ## Metric shard (`MetricRecord`)
 
@@ -73,9 +85,12 @@ condition; repeated conditions must be selected explicitly before inference.
 | `target_level_matches` | Occurrences exactly at target. |
 | `above_level_matches` | Occurrences above target. |
 
-`metadata` stores tokenizer, lexicon/catalog hashes, parser name/version/device,
-segmentation policies, and parser diagnostics. Unknown tokens remain distinct
-from known above-level tokens.
+`metadata` stores task projection hashes, tokenizer, lexicon/catalog hashes,
+parser name/version/device, segmentation policies, and parser diagnostics.
+Unknown tokens remain distinct from known above-level tokens. A metric with any
+missing/nonfinite value in a selected plotting condition is labelled unavailable
+as a whole; figures never obtain an apparently complete metric by silently
+dropping rows.
 
 ## Rating artifacts
 
@@ -84,6 +99,8 @@ The evaluator-facing CSV contains only `rating_id`, `task`, `hsk_level`, and
 The separately protected coordinator key maps random `rating_id` values back to
 the complete generation metadata. Rating records contain rater ID/type, 1–5
 dimension scores, rubric version, evidence spans, and optional rating time.
+For an empty or whitespace-only projected output, judge evidence uses the
+literal marker `[blank output]`; raw output remains preserved.
 
 ## Analysis tables and outputs
 
@@ -93,7 +110,9 @@ Callers select one run/replicate and provide enabled frozen model IDs in config
 order before aggregation. Statistical CSVs include `pvalue`, Holm-adjusted
 `p_adjusted`, `rank_biserial`, `median_difference`, `ci_low`, `ci_high`, paired
 sample size, seed, and permutation method/count. Figures are emitted as editable
-SVG and 300-dpi PNG.
+SVG and 300-dpi PNG. Confirmatory inference selects exactly one replicate.
+Descriptive stability plotting is a separate explicit mode and requires the
+same roster of at least two replicates in every prompt/model cell.
 
 Output folders are `raw`, `normalized`, `metrics`, `ratings`, `tables`, and
 `figures`. Generated contents are ignored by Git; `.gitkeep` records only the

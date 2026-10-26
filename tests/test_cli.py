@@ -9,7 +9,9 @@ from typer.testing import CliRunner
 import hsk_agent_bench.generators as generators
 import hsk_agent_bench.cli as cli
 from hsk_agent_bench.cli import app
+from hsk_agent_bench.config import load_experiment_config
 from hsk_agent_bench.io import write_jsonl_shard_atomic
+from hsk_agent_bench.runner import RunSummary
 from hsk_agent_bench.schemas import (
     ChatMessage, GenerationParameters, GenerationRecord, MetricRecord, TokenUsage,
 )
@@ -44,6 +46,7 @@ def test_generation_stage_rejects_pc_profile_before_reading_inputs(tmp_path):
     result = RUNNER.invoke(app, [
         "generate", "--config", str(ROOT / "configs/experiment.yaml"),
         "--device", str(ROOT / "configs/devices/pc.yaml"),
+        "--protocol", "primary",
         "--manifest", str(tmp_path / "missing.jsonl"),
         "--output-dir", str(tmp_path / "raw"),
     ])
@@ -98,6 +101,7 @@ def test_generate_dry_run_renders_requests_without_constructing_clients(tmp_path
     result = RUNNER.invoke(app, [
         "generate", "--config", str(ROOT / "configs/experiment.yaml"),
         "--device", str(ROOT / "configs/devices/laptop.yaml"),
+        "--protocol", "primary",
         "--manifest", str(manifest), "--output-dir", str(tmp_path / "raw"),
         "--preview-output", str(preview), "--dry-run",
     ])
@@ -128,11 +132,60 @@ def test_live_generation_rejects_unfrozen_model_ids_before_network(tmp_path, mon
     result = RUNNER.invoke(app, [
         "generate", "--config", str(ROOT / "configs/experiment.yaml"),
         "--device", str(ROOT / "configs/devices/laptop.yaml"),
+        "--protocol", "primary",
         "--manifest", str(manifest), "--output-dir", str(tmp_path / "raw"),
     ])
     assert result.exit_code != 0
     assert "freeze exact model ids" in result.output.lower()
     assert not (tmp_path / "raw").exists()
+
+
+def test_generate_protocol_selects_stochastic_settings_for_preview_and_live(tmp_path, monkeypatch):
+    manifest = tmp_path / "manifest.jsonl"
+    build = RUNNER.invoke(app, [
+        "build-prompts", "--config", str(ROOT / "configs/experiment.yaml"),
+        "--device", str(ROOT / "configs/devices/laptop.yaml"), "--output", str(manifest),
+    ])
+    assert build.exit_code == 0, build.output
+    preview = tmp_path / "stochastic.jsonl"
+    result = RUNNER.invoke(app, [
+        "generate", "--config", str(ROOT / "configs/experiment.yaml"),
+        "--device", str(ROOT / "configs/devices/laptop.yaml"), "--protocol", "stochastic",
+        "--manifest", str(manifest), "--output-dir", str(tmp_path / "raw"),
+        "--preview-output", str(preview), "--dry-run", "--run-id", "stochastic-pilot",
+    ])
+    assert result.exit_code == 0, result.output
+    requests = [json.loads(line) for line in preview.read_text(encoding="utf-8").splitlines()]
+    assert len(requests) == 36 * 4 * 3
+    assert {row["parameters"]["temperature"] for row in requests} == {.7}
+    assert {row["parameters"]["top_p"] for row in requests} == {.9}
+    assert {row["replicate"] for row in requests} == {0, 1, 2}
+
+    experiment = load_experiment_config(ROOT / "configs/experiment.yaml")
+    experiment.models = [model.model_copy(update={"model_id": f"frozen-{model.provider}"})
+                         for model in experiment.models]
+    captured = {}
+    async def capture(manifest, models, run, output_dir, **kwargs):
+        captured.update(manifest=manifest, run=run, kwargs=kwargs)
+        return RunSummary(run_id=kwargs["run_id"], output_dir=Path(output_dir) / kwargs["run_id"])
+    monkeypatch.setattr(cli, "load_experiment_config", lambda path: experiment.model_copy(deep=True))
+    monkeypatch.setattr(cli, "run_manifest", capture)
+    live = RUNNER.invoke(app, [
+        "generate", "--config", str(ROOT / "configs/experiment.yaml"),
+        "--device", str(ROOT / "configs/devices/laptop.yaml"), "--protocol", "stochastic",
+        "--manifest", str(manifest), "--output-dir", str(tmp_path / "live"),
+        "--run-id", "stochastic-pilot",
+    ])
+    assert live.exit_code == 0, live.output
+    assert captured["run"].model_dump() == experiment.stochastic.model_dump()
+    assert len(captured["manifest"]) == 144
+
+    invalid = RUNNER.invoke(app, [
+        "generate", "--config", str(ROOT / "configs/experiment.yaml"),
+        "--device", str(ROOT / "configs/devices/laptop.yaml"), "--protocol", "invented",
+        "--manifest", str(manifest), "--output-dir", str(tmp_path / "invalid"),
+    ])
+    assert invalid.exit_code != 0
 
 
 def test_analyze_adjusts_multiple_pvalues_within_declared_nonlexical_family(tmp_path):
@@ -186,7 +239,9 @@ def test_evaluate_uses_configured_lazy_cpu_parser_for_mdd(tmp_path, monkeypatch)
     )
     raw = tmp_path / "raw.jsonl"
     write_jsonl_shard_atomic([GenerationRecord(
-        **request, text="我学习。", raw_response={"fixture": True},
+        **request, text=json.dumps({"title": "学习", "passage": "我学习。", "declared_hsk_level": 3,
+                                   "used_required_vocabulary": [], "used_required_grammar": []},
+                                  ensure_ascii=False), raw_response={"fixture": True},
         requested_at=datetime(2026, 1, 1, tzinfo=timezone.utc), latency_ms=0,
         usage=TokenUsage(), retry_count=0, seed_applied=False,
     )], raw)
@@ -222,3 +277,23 @@ def test_plot_preflights_all_outputs_before_rendering(tmp_path):
     assert summary.read_text(encoding="utf-8") == "preserve-summary"
     assert sentinel.read_bytes() == b"preserve-figure"
     assert not (output / "overall_heatmap.png").exists()
+
+
+def test_plot_explicit_stability_mode_keeps_comparable_repeats(tmp_path):
+    primary = analysis_frame()
+    repeated = primary.assign(generation_id=primary.generation_id + "-repeat", replicate=1,
+                              v_in_token=primary.v_in_token - .03)
+    source = tmp_path / "repeated.csv"
+    pd.concat([primary, repeated], ignore_index=True).to_csv(source, index=False)
+    output = tmp_path / "figures"
+    result = RUNNER.invoke(app, [
+        "plot", "--input", str(source), "--output-dir", str(output),
+        "--config", str(ROOT / "configs/experiment.yaml"),
+        "--device", str(ROOT / "configs/devices/pc.yaml"), "--run-id", "primary",
+        "--include-repeats-for-stability",
+    ])
+    assert result.exit_code == 0, result.output
+    stability = (output / "model_stability.svg").read_text(encoding="utf-8")
+    assert "Within-prompt sample variance" in stability
+    summary = json.loads((output / "run-summary.json").read_text(encoding="utf-8"))
+    assert summary["include_repeats_for_stability"] is True

@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import pandas as pd
 import typer
@@ -19,6 +19,7 @@ from .config import ExperimentConfig, RunConfig, load_experiment_config
 from .evaluators.grammar import GrammarCatalog
 from .evaluators.human_ratings import blind_rating_sheet, sample_for_human_rating
 from .evaluators.lexical import HSKLexicon
+from .evaluators.materials import project_material_text
 from .evaluators.pipeline import EvaluationConfig, evaluate_shard, load_lexicon, load_parser_config
 from .evaluators.syntax import DependencyToken, ParsedDocument, ParsedSentence
 from .io import verify_shard, write_jsonl_shard_atomic
@@ -26,7 +27,7 @@ from .prompts.exam_generation import render_exam_prompt
 from .prompts.grammar_explanation import render_grammar_prompt
 from .prompts.manifest import build_manifest
 from .prompts.reading import render_reading_prompt
-from .runner import run_manifest
+from .runner import run_manifest, select_prompts
 from .schemas import (
     GenerationParameters, GenerationRecord, GenerationRequest, MetricRecord, PromptRecord, TokenUsage,
 )
@@ -81,7 +82,7 @@ def _request_id(prompt: PromptRecord, model_id: str, seed: int, replicate: int) 
 def _render_requests(config: ExperimentConfig, manifest: list[PromptRecord],
                      run: RunConfig, run_id: str) -> list[GenerationRequest]:
     requests = []
-    for prompt in manifest:
+    for prompt in select_prompts(manifest, run):
         messages = RENDERERS[str(prompt.task)](prompt)
         for model in (item for item in config.models if item.enabled):
             for seed_index, seed in enumerate(run.seeds):
@@ -119,6 +120,27 @@ def _condition(frame: pd.DataFrame, run_id: str | None, replicate: int | None) -
                 selected = selected.loc[selected[column] == value]
     if selected.empty:
         raise ValueError("selected analysis condition is empty")
+    return selected.copy()
+
+
+def _stability_condition(frame: pd.DataFrame, run_id: str | None) -> pd.DataFrame:
+    """Select one run while retaining an identical repeat roster in every cell."""
+    selected = frame
+    if "run_id" in selected:
+        choices = selected.run_id.dropna().unique()
+        if run_id is None and len(choices) > 1:
+            raise ValueError("select exactly one stability run with --run-id")
+        if run_id is not None:
+            selected = selected.loc[selected.run_id == run_id]
+    required = {"prompt_id", "model_id", "replicate"}
+    if selected.empty or not required <= set(selected) or selected[list(required)].isna().any().any():
+        raise ValueError("stability plotting requires prompt, model, and replicate identifiers")
+    if selected.duplicated(["prompt_id", "model_id", "replicate"]).any():
+        raise ValueError("duplicate stability prompt/model/replicate cell")
+    rosters = selected.groupby(["prompt_id", "model_id"]).replicate.apply(
+        lambda values: tuple(sorted(values.unique())))
+    if len(set(rosters)) != 1 or len(rosters.iloc[0]) < 2:
+        raise ValueError("stability plotting requires the same two or more repeats in every prompt/model cell")
     return selected.copy()
 
 
@@ -160,20 +182,23 @@ def build_prompts(config: PathOption, device: PathOption, output: PathOption) ->
 
 @app.command("generate")
 def generate(config: PathOption, device: PathOption, manifest: PathOption,
-             output_dir: PathOption, preview_output: Annotated[Path | None, typer.Option()] = None,
+             output_dir: PathOption,
+             protocol: Annotated[Literal["primary", "stochastic"], typer.Option("--protocol")],
+             preview_output: Annotated[Path | None, typer.Option()] = None,
              dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
              run_id: Annotated[str, typer.Option()] = "primary") -> None:
     """Generate provider outputs, or render a network-free request preview."""
     profile = _profile(device, "generate")
     experiment = load_experiment_config(config)
     prompts = _read_records(manifest, PromptRecord)
+    run = experiment.primary if protocol == "primary" else experiment.stochastic
     if dry_run:
         target = preview_output or manifest.with_name("request-preview.jsonl")
         target.parent.mkdir(parents=True, exist_ok=True)
-        requests = _render_requests(experiment, prompts, experiment.primary, run_id)
+        requests = _render_requests(experiment, prompts, run, run_id)
         checksum = write_jsonl_shard_atomic(requests, target)
         _json_summary(target.with_suffix(".summary.json"), {
-            "stage": "generate-preview", "requests": len(requests),
+            "stage": "generate-preview", "protocol": protocol, "requests": len(requests),
             "preview": target, "checksum": checksum,
         })
         typer.echo(f"preview={target}\nchecksum={checksum}")
@@ -183,7 +208,7 @@ def generate(config: PathOption, device: PathOption, manifest: PathOption,
     if placeholders:
         _fail("freeze exact model IDs before live generation: " + ", ".join(placeholders))
     summary = asyncio.run(run_manifest(
-        prompts, experiment.models, experiment.primary, output_dir,
+        prompts, experiment.models, run, output_dir,
         run_id=run_id, shard_namespace=profile["shard_namespace"],
     ))
     summary_path = summary.output_dir / "run-summary.json"
@@ -215,6 +240,9 @@ def prepare_ratings(input_path: Annotated[Path, typer.Option("--input")], output
     """Create a blinded rating sheet and a separately stored coordinator key."""
     _profile(device, "prepare-ratings")
     frame = _load_frame(input_path)
+    frame = frame.copy()
+    frame["text"] = [project_material_text(task, text, hsk_level=int(level))
+                     for task, text, level in zip(frame.task, frame.text, frame.hsk_level)]
     sheet, key = blind_rating_sheet(sample_for_human_rating(frame, fraction=fraction))
     for path in (output, key_output):
         if path.exists():
@@ -260,11 +288,20 @@ def analyze(input_path: Annotated[Path, typer.Option("--input")], output: PathOp
 def plot(input_path: Annotated[Path, typer.Option("--input")], output_dir: PathOption,
          config: PathOption, device: PathOption,
          run_id: Annotated[str | None, typer.Option()] = None,
-         replicate: Annotated[int | None, typer.Option()] = None) -> None:
+         replicate: Annotated[int | None, typer.Option()] = None,
+         include_repeats_for_stability: Annotated[
+             bool, typer.Option("--include-repeats-for-stability")
+         ] = False) -> None:
     """Render deterministic paper figures for one condition."""
     _profile(device, "plot")
     experiment = load_experiment_config(config)
-    frame = _condition(_load_frame(input_path), run_id, replicate)
+    source = _load_frame(input_path)
+    if include_repeats_for_stability:
+        if replicate is not None:
+            raise ValueError("--replicate is incompatible with --include-repeats-for-stability")
+        frame = _stability_condition(source, run_id)
+    else:
+        frame = _condition(source, run_id, replicate)
     order = [model.model_id for model in experiment.models if model.enabled]
     figure_names = (
         "overall_heatmap", "task_bars", "hsk_level_lines", "spillover_distribution",
@@ -278,7 +315,8 @@ def plot(input_path: Annotated[Path, typer.Option("--input")], output_dir: PathO
         _fail("plot output already exists: " + ", ".join(map(str, existing)))
     paths = build_all_figures(frame, output_dir, model_order=order)
     _json_summary(output_dir / "run-summary.json", {"stage": "plot", "figures": paths,
-                                                     "model_order": order})
+                                                     "model_order": order,
+                                                     "include_repeats_for_stability": include_repeats_for_stability})
     typer.echo("\n".join(map(str, paths)))
 
 
@@ -305,7 +343,9 @@ def dry_run(config: PathOption, device: PathOption,
         output_dir.mkdir(parents=True, exist_ok=False)
     except FileExistsError:
         _fail(f"output directory already exists: {output_dir}")
-    prompts = build_manifest(experiment)[:2]
+    complete_manifest = build_manifest(experiment)
+    prompts = [next(prompt for prompt in complete_manifest if prompt.task == task)
+               for task in ("reading", "grammar_explanation", "exam_generation")]
     models = [model for model in experiment.models if model.enabled]
     if {model.provider for model in models} != {"openai", "gemini", "qwen", "deepseek"}:
         raise ValueError("dry-run requires one enabled model for each of the four providers")
@@ -314,10 +354,26 @@ def dry_run(config: PathOption, device: PathOption,
     write_jsonl_shard_atomic(prompts, manifest)
     requests = _render_requests(experiment, prompts, experiment.primary.model_copy(
         update={"seeds": [20261025], "replicates": 1}), "dry-run")
-    text = {"china": "我学习中文，因为我喜欢中国文化。", "global": "我学习中文，我喜欢文化。"}
+    passages = {"china": "我学习中文，因为我喜欢中国文化。", "global": "我学习中文，我喜欢文化。"}
+    def fixture_text(request):
+        passage = passages[str(request.origin)]
+        if request.task == "reading":
+            payload = {"title": "学习中文", "passage": passage, "declared_hsk_level": request.hsk_level,
+                       "used_required_vocabulary": [], "used_required_grammar": []}
+        elif request.task == "grammar_explanation":
+            payload = {"explanation": "因为表示原因。", "form": "因为A，所以B",
+                       "usage_constraints": ["说明原因"], "examples": [passage],
+                       "incorrect_example": {"incorrect": "因为下雨，但是我在家。",
+                                             "correction": "因为下雨，所以我在家。"},
+                       "practice": {"question": "填空：___下雨，所以我在家。", "answer": "因为"}}
+        else:
+            payload = {"source_passage": passage, "items": [{"question": "谁学习中文？",
+                       "options": ["我", "你", "他", "老师"], "answer": "我",
+                       "rationale": "材料中的主语是我。", "target_vocabulary": [], "target_grammar": []}]}
+        return json.dumps(payload, ensure_ascii=False)
     now = datetime(2026, 1, 1, tzinfo=timezone.utc)
     records = [GenerationRecord(
-        **request.model_dump(), text=text[str(request.origin)], raw_response={"fixture": True},
+        **request.model_dump(), text=fixture_text(request), raw_response={"fixture": True},
         requested_at=now, request_id=f"fixture-{request.generation_id}", latency_ms=0,
         usage=TokenUsage(), finish_reason="stop", retry_count=0, seed_applied=False,
     ) for request in requests]
@@ -330,6 +386,8 @@ def dry_run(config: PathOption, device: PathOption,
     evaluate_shard(raw, metric_shard, EvaluationConfig(lexicon=lexicon, parser=_DryParser()))
     metric_records = _read_records(metric_shard, MetricRecord)
     generations = pd.DataFrame([record.model_dump(mode="json") for record in records])
+    generations["text"] = [project_material_text(record.task, record.text, hsk_level=record.hsk_level)
+                           for record in records]
     metrics = pd.DataFrame([record.model_dump(mode="json") for record in metric_records])
     table = join_analysis_tables(generations, metrics)
     # This fixture is exactly one run/replicate condition. Preserve frozen config order.

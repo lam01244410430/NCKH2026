@@ -65,12 +65,24 @@ python -m hsk_agent_bench.cli build-prompts `
 
 python -m hsk_agent_bench.cli generate `
   --config configs/experiment.yaml --device configs/devices/laptop.yaml `
+  --protocol primary `
   --manifest data/manifests/primary.jsonl --output-dir outputs/raw `
   --preview-output outputs/tables/request-preview.jsonl --dry-run
 ```
 
 After inspecting the preview and estimating cost, omit `--dry-run` to call the
-configured APIs. A shard is complete only when its sibling `.sha256` file is
+configured APIs. Use `--protocol stochastic` for the preregistered reduced
+stochastic run; the selected protocol controls temperature, top-p, prompt
+fraction, seeds, and replicates in both preview and live execution. `--run-id`
+is only an output label and never selects sampling settings. Prompt fractions
+are selected deterministically within every task/HSK-level stratum and the same
+frozen subset is reused for every model, seed, and replicate.
+
+Provider `text` must be one strict JSON object matching the requested task
+schema. Evaluation and rating preparation validate that object (including HSK
+level and exam-option uniqueness), then score/show a deterministic learner-facing
+projection. The original `text` and raw provider response remain unchanged in
+the immutable generation shard. A shard is complete only when its sibling `.sha256` file is
 present and verifies. Transfer both files to the PC and verify checksums before
 evaluation; never let the laptop and PC write the same shard namespace.
 
@@ -129,6 +141,21 @@ python -m hsk_agent_bench.cli plot `
   --config configs/experiment.yaml --device configs/devices/pc.yaml `
   --run-id primary --replicate 0
 ```
+
+Confirmatory inference and ordinary figures keep exactly one replicate. To
+render the descriptive stability panel across a balanced repeated condition,
+use a separate output directory and retain the full repeat roster explicitly:
+
+```powershell
+python -m hsk_agent_bench.cli plot `
+  --input outputs/normalized/stochastic.csv --output-dir outputs/figures-stability `
+  --config configs/experiment.yaml --device configs/devices/pc.yaml `
+  --run-id stochastic --include-repeats-for-stability
+```
+
+If a metric is unavailable for any selected row (for example MDD when no local
+parser is configured), plots label that entire metric unavailable and do not
+silently drop rows or change the scored sample.
 
 ## Pilot and full run
 
