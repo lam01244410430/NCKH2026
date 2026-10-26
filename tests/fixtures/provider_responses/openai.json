@@ -1,0 +1,1 @@
+{"id":"chatcmpl-gpt","object":"chat.completion","created":1700000000,"model":"gpt-snapshot-returned","system_fingerprint":"fp-gpt","choices":[{"index":0,"message":{"role":"assistant","content":"你好，世界。","refusal":null},"finish_reason":"stop","logprobs":null}],"usage":{"prompt_tokens":12,"completion_tokens":8,"total_tokens":20}}

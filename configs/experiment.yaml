@@ -1,0 +1,32 @@
+name: HSK-AgentBench
+model_registry: models.example.yaml
+levels: [3, 4, 5, 6]
+tasks: [reading, grammar_explanation, exam_generation]
+topics:
+  - daily life
+  - education
+  - work
+  - travel
+  - health
+  - technology
+  - environment
+  - culture
+  - public services
+  - commerce
+  - interpersonal communication
+  - academic life
+primary:
+  temperature: 0
+  top_p: 1.0
+  seeds: [20261025]
+  fraction: 1.0
+  replicates: 2 # Primary plus one reliability repeat.
+  # Configurable example budgets; freeze before the pilot.
+  max_output_tokens: {reading: 2048, grammar_explanation: 2048, exam_generation: 4096}
+stochastic:
+  temperature: 0.7
+  top_p: 0.9
+  seeds: [20261025, 20261026, 20261027]
+  fraction: 0.25
+  replicates: 1
+  max_output_tokens: {reading: 2048, grammar_explanation: 2048, exam_generation: 4096}

@@ -1,0 +1,35 @@
+# Replace placeholder IDs with exact frozen API IDs in a private models.yaml before pilot.
+# Capability flags are conservative examples; verify against the selected model versions.
+models:
+  - family: GPT
+    origin: global
+    provider: openai
+    model_id: FREEZE_OPENAI_MODEL_ID
+    api_key_env: OPENAI_API_KEY
+    base_url: https://api.openai.com/v1
+    capabilities: {seed: false, json_output: false, temperature: true, top_p: true}
+    enabled: true
+  - family: Gemini
+    origin: global
+    provider: gemini
+    model_id: FREEZE_GEMINI_MODEL_ID
+    api_key_env: GEMINI_API_KEY
+    base_url: null
+    capabilities: {seed: false, json_output: false, temperature: true, top_p: true}
+    enabled: true
+  - family: Qwen
+    origin: china
+    provider: qwen
+    model_id: FREEZE_QWEN_MODEL_ID
+    api_key_env: QWEN_API_KEY
+    base_url: null
+    capabilities: {seed: false, json_output: false, temperature: true, top_p: true}
+    enabled: true
+  - family: DeepSeek
+    origin: china
+    provider: deepseek
+    model_id: FREEZE_DEEPSEEK_MODEL_ID
+    api_key_env: DEEPSEEK_API_KEY
+    base_url: null
+    capabilities: {seed: false, json_output: false, temperature: true, top_p: true}
+    enabled: true

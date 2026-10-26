@@ -1,0 +1,5 @@
+name: laptop
+role: generation
+allowed_stages: [validate-data, build-prompts, generate]
+device: cpu
+shard_namespace: laptop
