@@ -1,16 +1,20 @@
 """Immutable evaluation of verified generation shards."""
 
 from dataclasses import dataclass
+import importlib
 import json
 from pathlib import Path
+import re
+from typing import Literal
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
+import yaml
 
 from ..io import verify_shard, write_jsonl_shard_atomic
 from ..schemas import GenerationRecord, MetricRecord, Record
 from .grammar import GrammarCatalog, score_grammar_alignment
 from .lexical import HSKLexicon, score_lexical_alignment
-from .syntax import ParsedDocument, Parser, score_syntax
+from .syntax import LazyParser, ParsedDocument, Parser, score_syntax
 from .tokenization import tokenize_chinese
 
 
@@ -20,6 +24,27 @@ class EvaluationSummary(Record):
     checksum_path: Path
     records_read: int = Field(ge=0)
     records_written: int = Field(ge=0)
+
+
+class CanonicalVocabularyResource(Record):
+    """Validated provenance-bearing row from the canonical vocabulary JSON."""
+
+    model_config = ConfigDict(frozen=True)
+    word: str = Field(min_length=1)
+    min_hsk_level: int = Field(strict=True, ge=1, le=9)
+    standard: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    license: str = Field(min_length=1)
+    notes: str | None = None
+
+
+class ParserPluginConfig(Record):
+    """Local parser factory metadata; only a CPU backend is accepted here."""
+
+    name: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    factory: str = Field(min_length=3)
+    device: Literal["cpu"] = "cpu"
 
 
 class _UnavailableParser:
@@ -48,13 +73,37 @@ def load_lexicon(path: Path) -> HSKLexicon:
     rows = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(rows, list):
         raise ValueError("vocabulary source must be a JSON array")
+    resources = [CanonicalVocabularyResource.model_validate(row) for row in rows]
     words: dict[str, int] = {}
-    for row in rows:
-        if not isinstance(row, dict) or "word" not in row or "min_hsk_level" not in row:
-            raise ValueError("each vocabulary row requires word and min_hsk_level")
-        word, level = row["word"], row["min_hsk_level"]
-        words[word] = min(words.get(word, level), level)
+    for resource in resources:
+        words[resource.word] = min(words.get(resource.word, resource.min_hsk_level),
+                                   resource.min_hsk_level)
     return HSKLexicon(words)
+
+
+def load_parser_config(path: Path) -> LazyParser:
+    """Create a lazy local CPU parser from a ``module:factory`` YAML config.
+
+    The module and factory are not imported or called until the first parse.
+    The factory receives the literal ``"cpu"`` and must return a local backend
+    with ``parse(text)``; downloading models is outside this interface.
+    """
+    payload = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    config = ParserPluginConfig.model_validate(payload)
+    pattern = r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+    if re.fullmatch(pattern, config.factory) is None:
+        raise ValueError("parser factory must be a module:callable import path")
+    module_name, attribute_path = config.factory.split(":", 1)
+
+    def loader(device: str):
+        target = importlib.import_module(module_name)
+        for attribute in attribute_path.split("."):
+            target = getattr(target, attribute)
+        if not callable(target):
+            raise TypeError("configured parser factory is not callable")
+        return target(device)
+
+    return LazyParser(name=config.name, version=config.version, loader=loader, device="cpu")
 
 
 def evaluate_shard(input_path: Path, output_path: Path,

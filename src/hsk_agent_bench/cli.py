@@ -19,7 +19,7 @@ from .config import ExperimentConfig, RunConfig, load_experiment_config
 from .evaluators.grammar import GrammarCatalog
 from .evaluators.human_ratings import blind_rating_sheet, sample_for_human_rating
 from .evaluators.lexical import HSKLexicon
-from .evaluators.pipeline import EvaluationConfig, evaluate_shard, load_lexicon
+from .evaluators.pipeline import EvaluationConfig, evaluate_shard, load_lexicon, load_parser_config
 from .evaluators.syntax import DependencyToken, ParsedDocument, ParsedSentence
 from .io import verify_shard, write_jsonl_shard_atomic
 from .prompts.exam_generation import render_exam_prompt
@@ -135,7 +135,10 @@ def validate_data(config: PathOption, device: PathOption, vocab: PathOption,
         problems.append(f"missing grammar source: {grammar}")
     if problems:
         _fail("\n".join(problems))
-    lexicon = load_lexicon(vocab)
+    try:
+        lexicon = load_lexicon(vocab)
+    except (OSError, ValueError, TypeError) as exc:
+        _fail(f"invalid vocabulary source: {exc}")
     catalog = GrammarCatalog.from_canonical(json.loads(grammar.read_text(encoding="utf-8")))
     _json_summary(summary, {"stage": "validate-data", "vocabulary_entries": len(lexicon),
                             "grammar_entries": len(catalog.rules), "grammar_sha256": catalog.sha256})
@@ -191,13 +194,16 @@ def generate(config: PathOption, device: PathOption, manifest: PathOption,
 @app.command("evaluate")
 def evaluate(input_path: Annotated[Path, typer.Option("--input")], output: PathOption,
              vocab: PathOption, grammar: Annotated[Path | None, typer.Option()] = None,
+             parser_config: Annotated[Path | None, typer.Option("--parser-config")] = None,
              device: PathOption = Path("configs/devices/pc.yaml")) -> None:
     """Evaluate one verified generation shard on the PC profile."""
     profile = _profile(device, "evaluate")
     catalog = None if grammar is None else GrammarCatalog.from_canonical(
         json.loads(grammar.read_text(encoding="utf-8")))
+    parser = None if parser_config is None else load_parser_config(parser_config)
     result = evaluate_shard(input_path, output, EvaluationConfig(
-        lexicon=load_lexicon(vocab), grammar_catalog=catalog, device=profile.get("device", "cpu")))
+        lexicon=load_lexicon(vocab), grammar_catalog=catalog, parser=parser,
+        device=profile.get("device", "cpu")))
     _json_summary(output.with_suffix(".summary.json"), result.model_dump(mode="json"))
     typer.echo(output)
 
@@ -223,7 +229,9 @@ def prepare_ratings(input_path: Annotated[Path, typer.Option("--input")], output
 
 @app.command("analyze")
 def analyze(input_path: Annotated[Path, typer.Option("--input")], output: PathOption,
-            config: PathOption, device: PathOption, metric: Annotated[str, typer.Option()] = "v_in_token",
+            config: PathOption, device: PathOption,
+            metric: Annotated[list[str], typer.Option("--metric")],
+            family: Annotated[str, typer.Option("--family")],
             run_id: Annotated[str | None, typer.Option()] = None,
             replicate: Annotated[int | None, typer.Option()] = None) -> None:
     """Run prompt-paired inference for one explicitly selected condition."""
@@ -233,13 +241,18 @@ def analyze(input_path: Annotated[Path, typer.Option("--input")], output: PathOp
     expected = [model.model_id for model in experiment.models if model.enabled]
     if set(frame.model_id) != set(expected):
         raise ValueError("analysis table must contain every enabled frozen-config model ID")
-    result = holm_adjust([paired_origin_test(frame, metric)], family="lexical")[0]
+    if not family.strip():
+        raise ValueError("metric family must be nonempty")
+    if not metric or len(metric) != len(set(metric)):
+        raise ValueError("declare one or more unique metrics")
+    results = holm_adjust([paired_origin_test(frame, name) for name in metric], family=family)
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.exists():
         raise FileExistsError(f"output already exists: {output}")
-    pd.DataFrame([asdict(result)]).to_csv(output, index=False)
+    pd.DataFrame([asdict(result) for result in results]).to_csv(output, index=False)
     _json_summary(output.with_suffix(".summary.json"), {"stage": "analyze", "table": output,
-                                                        "model_order": expected})
+                                                        "model_order": expected,
+                                                        "family": family, "metrics": metric})
     typer.echo(output)
 
 
@@ -253,6 +266,16 @@ def plot(input_path: Annotated[Path, typer.Option("--input")], output_dir: PathO
     experiment = load_experiment_config(config)
     frame = _condition(_load_frame(input_path), run_id, replicate)
     order = [model.model_id for model in experiment.models if model.enabled]
+    figure_names = (
+        "overall_heatmap", "task_bars", "hsk_level_lines", "spillover_distribution",
+        "model_stability", "judge_human_agreement",
+    )
+    expected_paths = [output_dir / "run-summary.json"] + [
+        output_dir / f"{name}.{suffix}" for name in figure_names for suffix in ("svg", "png")
+    ]
+    existing = [path for path in expected_paths if path.exists()]
+    if existing:
+        _fail("plot output already exists: " + ", ".join(map(str, existing)))
     paths = build_all_figures(frame, output_dir, model_order=order)
     _json_summary(output_dir / "run-summary.json", {"stage": "plot", "figures": paths,
                                                      "model_order": order})

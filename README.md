@@ -81,8 +81,26 @@ python -m hsk_agent_bench.cli evaluate `
   --output outputs/metrics/<shard>.metrics.jsonl `
   --vocab data/hsk_vocab_levels/hsk3.json `
   --grammar data/hsk_grammar_points/hsk3.json `
+  --parser-config configs/parser.yaml `
   --device configs/devices/pc.yaml
 ```
+
+`configs/parser.yaml` identifies a pinned local parser adapter without allowing
+the benchmark to download a model:
+
+```yaml
+name: your-parser
+version: "PINNED_VERSION"
+factory: your_local_package.parser:create_backend
+device: cpu
+```
+
+The factory module is imported lazily on the first evaluated record. Its
+`create_backend(device)` function receives `"cpu"` and returns an object with a
+`parse(text)` method producing the normalized dependency schema. Install and
+cache parser weights separately before collection; the factory must never
+download during a benchmark run. Omitting `--parser-config` deliberately emits
+a missing MDD plus a `not-configured` diagnostic rather than inventing a score.
 
 Prepare the human sheet while keeping the coordinator key private:
 
@@ -103,7 +121,8 @@ silently changing the origin contrast.
 python -m hsk_agent_bench.cli analyze `
   --input outputs/normalized/analysis.csv --output outputs/tables/primary.csv `
   --config configs/experiment.yaml --device configs/devices/pc.yaml `
-  --run-id primary --replicate 0
+  --run-id primary --replicate 0 --family lexical `
+  --metric v_in_token --metric v_oov_token
 
 python -m hsk_agent_bench.cli plot `
   --input outputs/normalized/analysis.csv --output-dir outputs/figures `
